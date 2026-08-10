@@ -18,6 +18,7 @@ import 'math_helper.dart';
 import 'point_connection.dart';
 import 'flutter_earth_globe_controller.dart';
 import 'sphere_image.dart';
+import 'region.dart';
 import 'sphere_painter.dart';
 import 'package:flutter/material.dart';
 
@@ -157,6 +158,7 @@ class RotatingGlobeState extends State<RotatingGlobe>
   List<PointRenderData> _pointRenderData = [];
   List<ArcRenderData> _arcRenderData = [];
   List<SatelliteRenderData> _satelliteRenderData = [];
+  List<RegionRenderData> _regionRenderData = [];
 
   // Track currently hovered elements to avoid redundant callbacks
   String? _currentHoveredPointId;
@@ -889,30 +891,43 @@ class RotatingGlobeState extends State<RotatingGlobe>
     clickPoint = details.localPosition;
     _clickNotifier.value = details.localPosition;
     // Don't call setState - the ValueNotifier will trigger foreground repaint
-    widget.onTap?.call(
-      convert2DPointToSphereCoordinates(
-        details.localPosition,
-        center,
-        convertedRadius(),
-        rotationY,
-        rotationZ,
-      ),
+    final coords = convert2DPointToSphereCoordinates(
+      details.localPosition,
+      center,
+      convertedRadius(),
+      rotationY,
+      rotationZ,
     );
+    widget.onTap?.call(coords);
+
+    if (coords != null) {
+      final matchedRegion = _getRegionAtCoordinates(coords);
+      if (matchedRegion != null) {
+        widget.controller.onRegionTap?.call(matchedRegion);
+      }
+    }
   }
 
   /// Update hover coordinates during rotation (when mouse doesn't move but globe rotates)
   void _updateHoverCoordinatesDuringRotation() {
     final currentHover = hoveringPoint;
-    if (currentHover != null && widget.onHover != null) {
-      widget.onHover?.call(
-        convert2DPointToSphereCoordinates(
-          currentHover,
-          center,
-          convertedRadius(),
-          rotationY,
-          rotationZ,
-        ),
+    if (currentHover != null) {
+      final coords = convert2DPointToSphereCoordinates(
+        currentHover,
+        center,
+        convertedRadius(),
+        rotationY,
+        rotationZ,
       );
+      if (widget.onHover != null) {
+        widget.onHover?.call(coords);
+      }
+      if (coords != null) {
+        final matchedRegion = _getRegionAtCoordinates(coords);
+        if (matchedRegion != null) {
+          widget.controller.onRegionHover?.call(matchedRegion);
+        }
+      }
     }
   }
 
@@ -921,15 +936,54 @@ class RotatingGlobeState extends State<RotatingGlobe>
     hoveringPoint = event.localPosition;
     _hoverNotifier.value = event.localPosition;
     // Don't call setState - the ValueNotifier will trigger foreground repaint
-    widget.onHover?.call(
-      convert2DPointToSphereCoordinates(
-        event.localPosition,
-        center,
-        convertedRadius(),
-        rotationY,
-        rotationZ,
-      ),
+    final coords = convert2DPointToSphereCoordinates(
+      event.localPosition,
+      center,
+      convertedRadius(),
+      rotationY,
+      rotationZ,
     );
+    widget.onHover?.call(coords);
+
+    if (coords != null) {
+      final matchedRegion = _getRegionAtCoordinates(coords);
+      if (matchedRegion != null) {
+        widget.controller.onRegionHover?.call(matchedRegion);
+      }
+    }
+  }
+
+  GlobeRegion? _getRegionAtCoordinates(GlobeCoordinates coords) {
+    for (final region in widget.controller.regions) {
+      if (!region.isVisible) continue;
+
+      for (final polygon in region.polygons) {
+        if (_isPointInPolygon(coords, polygon)) {
+          return region;
+        }
+      }
+    }
+    return null;
+  }
+
+  bool _isPointInPolygon(GlobeCoordinates point, List<List<double>> polygon) {
+    final x = point.longitude;
+    final y = point.latitude;
+    bool inside = false;
+    int i = 0;
+    int j = polygon.length - 1;
+    while (i < polygon.length) {
+      final xi = polygon[i][0];
+      final yi = polygon[i][1];
+      final xj = polygon[j][0];
+      final yj = polygon[j][1];
+
+      final intersect = ((yi > y) != (yj > y)) &&
+          (x < (xj - xi) * (y - yi) / (yj - yi) + xi);
+      if (intersect) inside = !inside;
+      j = i++;
+    }
+    return inside;
   }
 
   /// Apply smooth animated zoom like globe.gl
@@ -1236,6 +1290,16 @@ class RotatingGlobeState extends State<RotatingGlobe>
       now: now,
     );
 
+    // Calculate region positions
+    _regionRenderData = _foregroundRenderer.calculateRegionPositions(
+      regions: widget.controller.regions,
+      radius: convertedRadius(),
+      rotationY: rotationY,
+      rotationZ: rotationZ,
+      canvasSize: canvasSize,
+      selectedRegionIds: widget.controller.selectedRegionIds,
+    );
+
     // Calculate arc positions
     _arcRenderData = _foregroundRenderer.calculateConnectionPositions(
       connections: widget.controller.connections,
@@ -1329,6 +1393,7 @@ class RotatingGlobeState extends State<RotatingGlobe>
       points: _pointRenderData,
       arcs: _arcRenderData,
       satellites: _satelliteRenderData,
+      regions: _regionRenderData,
       radius: convertedRadius(),
       center: center,
       hoverPoint: _hoverNotifier.value,

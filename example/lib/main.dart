@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'package:flutter_earth_globe/flutter_earth_globe.dart';
 import 'package:flutter_earth_globe/flutter_earth_globe_controller.dart';
 import 'package:flutter_earth_globe/globe_coordinates.dart';
@@ -361,6 +362,50 @@ class _HomeState extends State<Home> with TickerProviderStateMixin {
     GlobeControlsState.instance.setRotationSpeed(_controller.rotationSpeed);
     GlobeControlsState.instance
         .setDayNightBlendFactor(_controller.dayNightBlendFactor);
+    _loadRegions();
+  }
+
+  Future<void> _loadRegions() async {
+    try {
+      final jsonString = await DefaultAssetBundle.of(context)
+          .loadString('assets/geo/countries_10m.geojson');
+      final geojson = jsonDecode(jsonString) as Map<String, dynamic>;
+      _controller.loadRegionDataset(
+        geojson,
+        defaultBorderColor: Colors.white.withOpacity(0.5),
+        defaultBorderWidth: 0.5,
+        defaultFillColor: Colors.blue.withOpacity(0.1),
+        defaultHighlightColor: Colors.orange.withOpacity(0.4),
+        clipAgainstBuilder: (id) {
+          if (id.startsWith('PAK') || id.startsWith('CHN')) {
+            return ['IND'];
+          }
+          return [];
+        },
+      );
+
+      _controller.onRegionTap = (region) {
+        print('Region tapped: ${region.name} (${region.id})');
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Tapped region: ${region.name} (${region.id})'),
+            duration: const Duration(seconds: 1),
+            behavior: SnackBarBehavior.floating,
+          ),
+        );
+        if (_controller.selectedRegionIds.contains(region.id)) {
+          _controller.selectRegions([]);
+        } else {
+          _controller.selectRegions([region.id]);
+        }
+      };
+
+      _controller.onRegionHover = (region) {
+        print('Region hovered: ${region.name}');
+      };
+    } catch (e) {
+      print('Error loading regions: $e');
+    }
   }
 
   Widget _buildCollapsibleSection({
