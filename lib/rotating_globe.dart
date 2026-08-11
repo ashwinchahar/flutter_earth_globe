@@ -18,7 +18,6 @@ import 'math_helper.dart';
 import 'point_connection.dart';
 import 'flutter_earth_globe_controller.dart';
 import 'sphere_image.dart';
-import 'region.dart';
 import 'sphere_painter.dart';
 import 'package:flutter/material.dart';
 
@@ -218,6 +217,11 @@ class RotatingGlobeState extends State<RotatingGlobe>
       });
 
     widget.controller.onPointConnectionAdded = _addConnection;
+
+    // Initialize animationProgress for any connections added before mounting
+    for (final connection in widget.controller.connections) {
+      connection.animationProgress = 1.0;
+    }
 
     widget.controller.onResetGlobeRotation = resetRotation;
 
@@ -456,6 +460,10 @@ class RotatingGlobeState extends State<RotatingGlobe>
       {required bool animate,
       required Duration? duration,
       Curve curve = Curves.linear}) {
+    // Stop auto-rotation during the transition to prevent conflicting animation updates
+    widget.controller.rotationController.stop();
+    _autoRotationDelayTimer?.cancel();
+
     double latRad = radians(coordinates.latitude);
     double lonRad = radians(-coordinates.longitude);
     final targetRotationZ = -lonRad;
@@ -466,9 +474,16 @@ class RotatingGlobeState extends State<RotatingGlobe>
       final initialRotationX = rotationX;
       final initialRotationY = rotationY;
 
-      final rZ = targetRotationZ - initialRotationZ;
-      final rX = targetRotationX - initialRotationX;
-      final rY = targetRotationY - initialRotationY;
+      // Shortest path interpolation for Z (longitude)
+      double rZ = targetRotationZ - initialRotationZ;
+      rZ = (rZ + math.pi) % (2 * math.pi) - math.pi;
+
+      // Shortest path interpolation for Y/X (latitude)
+      double rY = targetRotationY - initialRotationY;
+      rY = (rY + math.pi) % (2 * math.pi) - math.pi;
+
+      double rX = targetRotationX - initialRotationX;
+      rX = (rX + math.pi) % (2 * math.pi) - math.pi;
 
       _genericCurvedAnimation?.dispose();
       genericAnimationController?.dispose();
@@ -488,12 +503,24 @@ class RotatingGlobeState extends State<RotatingGlobe>
 
         setState(() {});
       });
+
+      genericAnimationController!.addStatusListener((status) {
+        if (status == AnimationStatus.completed) {
+          if (widget.controller.isRotating) {
+            widget.controller.rotationController.repeat();
+          }
+        }
+      });
+
       genericAnimationController!.forward();
     } else {
       rotationX = targetRotationX;
       rotationY = targetRotationY;
       rotationZ = targetRotationZ;
       setState(() {});
+      if (widget.controller.isRotating) {
+        widget.controller.rotationController.repeat();
+      }
     }
   }
 
@@ -529,8 +556,35 @@ class RotatingGlobeState extends State<RotatingGlobe>
     if (mounted) setState(() {});
   }
 
+  Timer? _autoRotationDelayTimer;
+
+  void _resetAutoRotationDelayTimer() {
+    _autoRotationDelayTimer?.cancel();
+    if (widget.controller.isRotating) {
+      _autoRotationDelayTimer = Timer(const Duration(seconds: 5), () {
+        if (mounted && widget.controller.isRotating) {
+          // If deceleration controller is still running, let it finish first
+          if (!_decelerationController.isAnimating) {
+            widget.controller.rotationController.repeat();
+          } else {
+            // Check again in 500ms
+            _autoRotationDelayTimer =
+                Timer(const Duration(milliseconds: 500), () {
+              if (mounted &&
+                  widget.controller.isRotating &&
+                  !_decelerationController.isAnimating) {
+                widget.controller.rotationController.repeat();
+              }
+            });
+          }
+        }
+      });
+    }
+  }
+
   @override
   void dispose() {
+    _autoRotationDelayTimer?.cancel();
     widget.controller.removeListener(_update);
     widget.controller.rotationController.dispose();
     _lineMovingController.stop();
@@ -891,43 +945,30 @@ class RotatingGlobeState extends State<RotatingGlobe>
     clickPoint = details.localPosition;
     _clickNotifier.value = details.localPosition;
     // Don't call setState - the ValueNotifier will trigger foreground repaint
-    final coords = convert2DPointToSphereCoordinates(
-      details.localPosition,
-      center,
-      convertedRadius(),
-      rotationY,
-      rotationZ,
+    widget.onTap?.call(
+      convert2DPointToSphereCoordinates(
+        details.localPosition,
+        center,
+        convertedRadius(),
+        rotationY,
+        rotationZ,
+      ),
     );
-    widget.onTap?.call(coords);
-
-    if (coords != null) {
-      final matchedRegion = _getRegionAtCoordinates(coords);
-      if (matchedRegion != null) {
-        widget.controller.onRegionTap?.call(matchedRegion);
-      }
-    }
   }
 
   /// Update hover coordinates during rotation (when mouse doesn't move but globe rotates)
   void _updateHoverCoordinatesDuringRotation() {
     final currentHover = hoveringPoint;
-    if (currentHover != null) {
-      final coords = convert2DPointToSphereCoordinates(
-        currentHover,
-        center,
-        convertedRadius(),
-        rotationY,
-        rotationZ,
+    if (currentHover != null && widget.onHover != null) {
+      widget.onHover?.call(
+        convert2DPointToSphereCoordinates(
+          currentHover,
+          center,
+          convertedRadius(),
+          rotationY,
+          rotationZ,
+        ),
       );
-      if (widget.onHover != null) {
-        widget.onHover?.call(coords);
-      }
-      if (coords != null) {
-        final matchedRegion = _getRegionAtCoordinates(coords);
-        if (matchedRegion != null) {
-          widget.controller.onRegionHover?.call(matchedRegion);
-        }
-      }
     }
   }
 
@@ -936,54 +977,15 @@ class RotatingGlobeState extends State<RotatingGlobe>
     hoveringPoint = event.localPosition;
     _hoverNotifier.value = event.localPosition;
     // Don't call setState - the ValueNotifier will trigger foreground repaint
-    final coords = convert2DPointToSphereCoordinates(
-      event.localPosition,
-      center,
-      convertedRadius(),
-      rotationY,
-      rotationZ,
+    widget.onHover?.call(
+      convert2DPointToSphereCoordinates(
+        event.localPosition,
+        center,
+        convertedRadius(),
+        rotationY,
+        rotationZ,
+      ),
     );
-    widget.onHover?.call(coords);
-
-    if (coords != null) {
-      final matchedRegion = _getRegionAtCoordinates(coords);
-      if (matchedRegion != null) {
-        widget.controller.onRegionHover?.call(matchedRegion);
-      }
-    }
-  }
-
-  GlobeRegion? _getRegionAtCoordinates(GlobeCoordinates coords) {
-    for (final region in widget.controller.regions) {
-      if (!region.isVisible) continue;
-
-      for (final polygon in region.polygons) {
-        if (_isPointInPolygon(coords, polygon)) {
-          return region;
-        }
-      }
-    }
-    return null;
-  }
-
-  bool _isPointInPolygon(GlobeCoordinates point, List<List<double>> polygon) {
-    final x = point.longitude;
-    final y = point.latitude;
-    bool inside = false;
-    int i = 0;
-    int j = polygon.length - 1;
-    while (i < polygon.length) {
-      final xi = polygon[i][0];
-      final yi = polygon[i][1];
-      final xj = polygon[j][0];
-      final yj = polygon[j][1];
-
-      final intersect = ((yi > y) != (yj > y)) &&
-          (x < (xj - xi) * (y - yi) / (yj - yi) + xi);
-      if (intersect) inside = !inside;
-      j = i++;
-    }
-    return inside;
   }
 
   /// Apply smooth animated zoom like globe.gl
@@ -1126,7 +1128,8 @@ class RotatingGlobeState extends State<RotatingGlobe>
     if (widget.controller.surface == null) return null;
 
     final hasDayNightCycle = widget.controller.isDayNightCycleEnabled &&
-        widget.controller.nightSurface != null;
+        (widget.controller.nightSurface != null ||
+            widget.controller.dayNightMode == DayNightMode.simulated);
 
     // Check if we need to recreate the shader (textures changed or shader needs recreation)
     final daySurface = widget.controller.surface!;
@@ -1280,6 +1283,8 @@ class RotatingGlobeState extends State<RotatingGlobe>
     final now = DateTime.now();
     final canvasSize = Size(constraints.maxWidth, constraints.maxHeight);
 
+    _foregroundRenderer.regions = widget.controller.regions;
+
     // Calculate point positions
     _pointRenderData = _foregroundRenderer.calculatePointPositions(
       points: widget.controller.points,
@@ -1290,9 +1295,9 @@ class RotatingGlobeState extends State<RotatingGlobe>
       now: now,
     );
 
-    // Calculate region positions
+// Calculate geographic region positions
     _regionRenderData = _foregroundRenderer.calculateRegionPositions(
-      regions: widget.controller.regions,
+      regions: _foregroundRenderer.regions,
       radius: convertedRadius(),
       rotationY: rotationY,
       rotationZ: rotationZ,
@@ -1804,6 +1809,7 @@ class RotatingGlobeState extends State<RotatingGlobe>
                 _lastFocalPoint = details.focalPoint;
                 _lastScale = 1.0; // Reset scale tracking
 
+                _autoRotationDelayTimer?.cancel();
                 if (_decelerationController.isAnimating) {
                   _decelerationController.stop();
                   _decelerationController.reset();
@@ -1820,6 +1826,7 @@ class RotatingGlobeState extends State<RotatingGlobe>
                 setState(() {});
               },
               onInteractionUpdate: (ScaleUpdateDetails details) {
+                _autoRotationDelayTimer?.cancel();
                 if (widget.controller.isZoomEnabled && details.scale != 1.0) {
                   // Use incremental scale changes for smoother pinch zoom
                   final scaleDelta = details.scale - _lastScale;
@@ -1877,8 +1884,7 @@ class RotatingGlobeState extends State<RotatingGlobe>
                 }
 
                 if (widget.controller.isRotating) {
-                  widget.controller.rotationController.forward(
-                      from: widget.controller.rotationController.value);
+                  _resetAutoRotationDelayTimer();
                 }
               },
               child: GestureDetector(

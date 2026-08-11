@@ -158,6 +158,7 @@ class CachedOrbitPath {
 class RegionRenderData {
   final String id;
   final List<Path> visiblePaths;
+  final Path? fillPath;
   final Color borderColor;
   final double borderWidth;
   final Color? fillColor;
@@ -169,6 +170,7 @@ class RegionRenderData {
   const RegionRenderData({
     required this.id,
     required this.visiblePaths,
+    this.fillPath,
     required this.borderColor,
     required this.borderWidth,
     required this.fillColor,
@@ -207,6 +209,7 @@ class GlobeForegroundRenderer {
   Size? _lastRegionCanvasSize;
   Set? _lastRegionSelectedIds;
   List? _lastRegions;
+  int? _lastRegionLength;
 
   bool _setEquals(Set? a, Set? b) {
     if (a == null || b == null) return a == b;
@@ -425,6 +428,7 @@ class GlobeForegroundRenderer {
         _lastRegionRotationZ == rotationZ &&
         _lastRegionCanvasSize == canvasSize &&
         identical(_lastRegions, regions) &&
+        _lastRegionLength == regions.length &&
         _setEquals(_lastRegionSelectedIds, selectedRegionIds);
 
     if (isCacheValid) {
@@ -482,8 +486,15 @@ class GlobeForegroundRenderer {
           continue;
         }
 
-        final List<Path> visiblePaths = [];
-        Path? currentPath;
+        final fillColor = selectedRegionIds.contains(region.id) && region.highlightColor != null
+            ? region.highlightColor!
+            : region.fillColor;
+        final needsFill = fillColor != null;
+
+        final List<Path> borderPaths = [];
+        Path? currentBorderBorderPath;
+        final fillPath = needsFill ? Path() : null;
+        bool isFirst = true;
 
         for (final unitVector in polygon.vertices) {
           final x = unitVector.x;
@@ -493,37 +504,69 @@ class GlobeForegroundRenderer {
           // Perform rotation directly
           final rotatedX = r00 * x + r01 * y + r02 * z;
 
+          // Project for borders (only front-facing)
           if (rotatedX > 0) {
             final px = center.dx + m10 * x + m11 * y;
             final py = center.dy + m20 * x + m21 * y + m22 * z;
 
-            if (currentPath == null) {
-              currentPath = Path();
-              currentPath.moveTo(px, py);
+            if (currentBorderBorderPath == null) {
+              currentBorderBorderPath = Path();
+              currentBorderBorderPath.moveTo(px, py);
             } else {
-              currentPath.lineTo(px, py);
+              currentBorderBorderPath.lineTo(px, py);
             }
           } else {
-            if (currentPath != null) {
-              visiblePaths.add(currentPath);
-              currentPath = null;
+            if (currentBorderBorderPath != null) {
+              borderPaths.add(currentBorderBorderPath);
+              currentBorderBorderPath = null;
+            }
+          }
+
+          // Project for fill (clamp back-facing to horizon circle, only if needed)
+          if (needsFill) {
+            double fpx, fpy;
+            if (rotatedX > 0) {
+              fpx = center.dx + m10 * x + m11 * y;
+              fpy = center.dy + m20 * x + m21 * y + m22 * z;
+            } else {
+              final ry = r10 * x + r11 * y;
+              final rzVal = r20 * x + r21 * y + r22 * z;
+              final d = math.sqrt(ry * ry + rzVal * rzVal);
+              if (d > 0.0001) {
+                fpx = center.dx + (ry / d) * radius;
+                fpy = center.dy - (rzVal / d) * radius;
+              } else {
+                fpx = center.dx;
+                fpy = center.dy;
+              }
+            }
+
+            if (isFirst) {
+              fillPath!.moveTo(fpx, fpy);
+              isFirst = false;
+            } else {
+              fillPath!.lineTo(fpx, fpy);
             }
           }
         }
 
-        if (currentPath != null) {
-          visiblePaths.add(currentPath);
+        if (currentBorderBorderPath != null) {
+          borderPaths.add(currentBorderBorderPath);
+        }
+        if (needsFill && !isFirst) {
+          fillPath!.close();
         }
 
         // If no parts of the polygon are visible, skip adding it
-        if (visiblePaths.isEmpty) {
+        if (borderPaths.isEmpty) {
           continue;
         }
 
         result.add(
           RegionRenderData(
             id: '${region.id}_$polygonIndex',
-            visiblePaths: visiblePaths,
+            visiblePaths: borderPaths,
+            fillPath: fillPath,
             borderColor: region.borderColor,
             borderWidth: region.borderWidth,
             fillColor: region.fillColor,
@@ -543,6 +586,7 @@ class GlobeForegroundRenderer {
     _lastRegionRotationZ = rotationZ;
     _lastRegionCanvasSize = canvasSize;
     _lastRegions = regions;
+    _lastRegionLength = regions.length;
     _lastRegionSelectedIds = Set.from(selectedRegionIds);
 
     return result;
@@ -972,31 +1016,46 @@ class GpuForegroundPainter extends CustomPainter {
     String? currentHoveredConnectionId;
     bool clickHandled = false;
 
+    // Cache to avoid rebuilding the combined clip paths repeatedly on the same frame
+    final Map<String, Path?> frameClipPathCache = {};
+
     // Draw all visible regions with generic clipping
     for (final region in regions) {
       if (!region.isVisible) continue;
 
       Path? inverseClipPath;
       if (region.clipAgainst.isNotEmpty) {
-        final clipIds = region.clipAgainst.toSet();
-        final combinedClipPath = Path();
-        bool hasClips = false;
+        final clipKey = (List<String>.from(region.clipAgainst)..sort()).join(',');
 
-        for (final otherRegion in regions) {
-          final otherBaseId = otherRegion.id.split('_').first;
-          if (clipIds.contains(otherBaseId)) {
-            for (final path in otherRegion.visiblePaths) {
-              combinedClipPath.addPath(path, Offset.zero);
-              hasClips = true;
+        if (frameClipPathCache.containsKey(clipKey)) {
+          inverseClipPath = frameClipPathCache[clipKey];
+        } else {
+          final clipIds = region.clipAgainst.toSet();
+          final combinedClipPath = Path();
+          bool hasClips = false;
+
+          for (final otherRegion in regions) {
+            final otherBaseId = otherRegion.id.split('_').first;
+            if (clipIds.contains(otherBaseId)) {
+              if (otherRegion.fillPath != null) {
+                combinedClipPath.addPath(otherRegion.fillPath!, Offset.zero);
+                hasClips = true;
+              } else {
+                for (final path in otherRegion.visiblePaths) {
+                  combinedClipPath.addPath(path, Offset.zero);
+                  hasClips = true;
+                }
+              }
             }
           }
-        }
 
-        if (hasClips) {
-          inverseClipPath = Path()
-            ..addRect(Rect.fromLTWH(-size.width, -size.height, size.width * 3, size.height * 3))
-            ..addPath(combinedClipPath, Offset.zero);
-          inverseClipPath.fillType = PathFillType.evenOdd;
+          if (hasClips) {
+            inverseClipPath = Path()
+              ..addRect(Rect.fromLTWH(-size.width, -size.height, size.width * 3, size.height * 3))
+              ..addPath(combinedClipPath, Offset.zero);
+            inverseClipPath.fillType = PathFillType.evenOdd;
+          }
+          frameClipPathCache[clipKey] = inverseClipPath;
         }
       }
 
@@ -1642,33 +1701,31 @@ class GpuForegroundPainter extends CustomPainter {
     Canvas canvas,
     RegionRenderData region,
   ) {
-    if (region.visiblePaths.isEmpty) return;
-
     // Draw the fill first so the border remains visible on top.
     final fillColor = region.isSelected && region.highlightColor != null
         ? region.highlightColor!
         : region.fillColor;
 
-    if (fillColor != null) {
+    if (fillColor != null && region.fillPath != null) {
       final fillPaint = Paint()
         ..style = PaintingStyle.fill
         ..color = fillColor;
 
-      for (final path in region.visiblePaths) {
-        canvas.drawPath(path, fillPaint);
-      }
+      canvas.drawPath(region.fillPath!, fillPaint);
     }
 
-    // Draw the border on top.
-    final borderPaint = Paint()
-      ..style = PaintingStyle.stroke
-      ..strokeWidth = region.borderWidth
-      ..color = region.borderColor
-      ..strokeCap = StrokeCap.round
-      ..strokeJoin = StrokeJoin.round;
+    if (region.visiblePaths.isNotEmpty) {
+      // Draw the border on top.
+      final borderPaint = Paint()
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = region.borderWidth
+        ..color = region.borderColor
+        ..strokeCap = StrokeCap.round
+        ..strokeJoin = StrokeJoin.round;
 
-    for (final path in region.visiblePaths) {
-      canvas.drawPath(path, borderPaint);
+      for (final path in region.visiblePaths) {
+        canvas.drawPath(path, borderPaint);
+      }
     }
   }
 }
