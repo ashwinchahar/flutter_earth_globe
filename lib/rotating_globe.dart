@@ -101,6 +101,7 @@ class RotatingGlobeState extends State<RotatingGlobe>
   double _initialRotationX = 0.0;
   double _initialRotationY = 0.0;
   double _initialRotationZ = 0.0;
+  DateTime _lastRotationTick = DateTime.now();
 
   // Cached sphere image and parameters for performance
   SphereImage? _cachedSphereImage;
@@ -196,11 +197,18 @@ class RotatingGlobeState extends State<RotatingGlobe>
       vsync: this,
       duration: const Duration(seconds: 1),
     )..addListener(() {
+        final now = DateTime.now();
+        double dt = now.difference(_lastRotationTick).inMicroseconds / 1000000.0;
+        _lastRotationTick = now;
+        if (dt <= 0.0 || dt > 0.1) {
+          dt = 1 / 60.0;
+        }
+
         if (mounted) {
           setState(() {
             rotationZ = (rotationZ -
                     (widget.controller.rotationSpeed *
-                        ((math.pow((2 * math.pi), 2) / 360)))) %
+                        ((math.pow((2 * math.pi), 2) / 360)) * 60.0 * dt)) %
                 (2 * math.pi);
           });
 
@@ -216,6 +224,11 @@ class RotatingGlobeState extends State<RotatingGlobe>
       });
 
     widget.controller.onPointConnectionAdded = _addConnection;
+
+    // Initialize animationProgress for any connections added before mounting
+    for (final connection in widget.controller.connections) {
+      connection.animationProgress = 1.0;
+    }
 
     widget.controller.onResetGlobeRotation = resetRotation;
 
@@ -454,6 +467,10 @@ class RotatingGlobeState extends State<RotatingGlobe>
       {required bool animate,
       required Duration? duration,
       Curve curve = Curves.linear}) {
+    // Stop auto-rotation during the transition to prevent conflicting animation updates
+    widget.controller.rotationController.stop();
+    _autoRotationDelayTimer?.cancel();
+
     double latRad = radians(coordinates.latitude);
     double lonRad = radians(-coordinates.longitude);
     final targetRotationZ = -lonRad;
@@ -464,9 +481,16 @@ class RotatingGlobeState extends State<RotatingGlobe>
       final initialRotationX = rotationX;
       final initialRotationY = rotationY;
 
-      final rZ = targetRotationZ - initialRotationZ;
-      final rX = targetRotationX - initialRotationX;
-      final rY = targetRotationY - initialRotationY;
+      // Shortest path interpolation for Z (longitude)
+      double rZ = targetRotationZ - initialRotationZ;
+      rZ = (rZ + math.pi) % (2 * math.pi) - math.pi;
+
+      // Shortest path interpolation for Y/X (latitude)
+      double rY = targetRotationY - initialRotationY;
+      rY = (rY + math.pi) % (2 * math.pi) - math.pi;
+
+      double rX = targetRotationX - initialRotationX;
+      rX = (rX + math.pi) % (2 * math.pi) - math.pi;
 
       _genericCurvedAnimation?.dispose();
       genericAnimationController?.dispose();
@@ -486,12 +510,26 @@ class RotatingGlobeState extends State<RotatingGlobe>
 
         setState(() {});
       });
+
+      genericAnimationController!.addStatusListener((status) {
+        if (status == AnimationStatus.completed && mounted) {
+          if (widget.controller.isRotating) {
+            _lastRotationTick = DateTime.now();
+            widget.controller.rotationController.repeat();
+          }
+        }
+      });
+
       genericAnimationController!.forward();
     } else {
       rotationX = targetRotationX;
       rotationY = targetRotationY;
       rotationZ = targetRotationZ;
       setState(() {});
+      if (widget.controller.isRotating) {
+        _lastRotationTick = DateTime.now();
+        widget.controller.rotationController.repeat();
+      }
     }
   }
 
@@ -527,8 +565,37 @@ class RotatingGlobeState extends State<RotatingGlobe>
     if (mounted) setState(() {});
   }
 
+  Timer? _autoRotationDelayTimer;
+
+  void _resetAutoRotationDelayTimer() {
+    _autoRotationDelayTimer?.cancel();
+    if (widget.controller.isRotating) {
+      _autoRotationDelayTimer = Timer(const Duration(seconds: 5), () {
+        if (mounted && widget.controller.isRotating) {
+          // If deceleration controller is still running, let it finish first
+          if (!_decelerationController.isAnimating) {
+            _lastRotationTick = DateTime.now();
+            widget.controller.rotationController.repeat();
+          } else {
+            // Check again in 500ms
+            _autoRotationDelayTimer =
+                Timer(const Duration(milliseconds: 500), () {
+              if (mounted &&
+                  widget.controller.isRotating &&
+                  !_decelerationController.isAnimating) {
+                _lastRotationTick = DateTime.now();
+                widget.controller.rotationController.repeat();
+              }
+            });
+          }
+        }
+      });
+    }
+  }
+
   @override
   void dispose() {
+    _autoRotationDelayTimer?.cancel();
     widget.controller.removeListener(_update);
     widget.controller.rotationController.dispose();
     _lineMovingController.stop();
@@ -1072,7 +1139,8 @@ class RotatingGlobeState extends State<RotatingGlobe>
     if (widget.controller.surface == null) return null;
 
     final hasDayNightCycle = widget.controller.isDayNightCycleEnabled &&
-        widget.controller.nightSurface != null;
+        (widget.controller.nightSurface != null ||
+            widget.controller.dayNightMode == DayNightMode.simulated);
 
     // Check if we need to recreate the shader (textures changed or shader needs recreation)
     final daySurface = widget.controller.surface!;
@@ -1739,6 +1807,7 @@ class RotatingGlobeState extends State<RotatingGlobe>
                 _lastFocalPoint = details.focalPoint;
                 _lastScale = 1.0; // Reset scale tracking
 
+                _autoRotationDelayTimer?.cancel();
                 if (_decelerationController.isAnimating) {
                   _decelerationController.stop();
                   _decelerationController.reset();
@@ -1755,6 +1824,7 @@ class RotatingGlobeState extends State<RotatingGlobe>
                 setState(() {});
               },
               onInteractionUpdate: (ScaleUpdateDetails details) {
+                _autoRotationDelayTimer?.cancel();
                 if (widget.controller.isZoomEnabled && details.scale != 1.0) {
                   // Use incremental scale changes for smoother pinch zoom
                   final scaleDelta = details.scale - _lastScale;
@@ -1812,8 +1882,7 @@ class RotatingGlobeState extends State<RotatingGlobe>
                 }
 
                 if (widget.controller.isRotating) {
-                  widget.controller.rotationController.forward(
-                      from: widget.controller.rotationController.value);
+                  _resetAutoRotationDelayTimer();
                 }
               },
               child: GestureDetector(
