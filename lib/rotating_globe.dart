@@ -492,8 +492,7 @@ class RotatingGlobeState extends State<RotatingGlobe>
       double rX = targetRotationX - initialRotationX;
       rX = (rX + math.pi) % (2 * math.pi) - math.pi;
 
-      _genericCurvedAnimation?.dispose();
-      genericAnimationController?.dispose();
+      _cancelFocusAnimation();
       genericAnimationController = AnimationController(
         vsync: this,
         duration: duration,
@@ -522,6 +521,7 @@ class RotatingGlobeState extends State<RotatingGlobe>
 
       genericAnimationController!.forward();
     } else {
+      _cancelFocusAnimation();
       rotationX = targetRotationX;
       rotationY = targetRotationY;
       rotationZ = targetRotationZ;
@@ -533,12 +533,31 @@ class RotatingGlobeState extends State<RotatingGlobe>
     }
   }
 
+  /// Cancel active focus animation if running
+  void _cancelFocusAnimation() {
+    _genericCurvedAnimation?.dispose();
+    _genericCurvedAnimation = null;
+    genericAnimationController?.stop();
+    genericAnimationController?.dispose();
+    genericAnimationController = null;
+  }
+
   /// Reset the rotation of the sphere
   void resetRotation() {
+    _cancelFocusAnimation();
+    _autoRotationDelayTimer?.cancel();
+    if (_decelerationController.isAnimating) {
+      _decelerationController.stop();
+      _decelerationController.reset();
+    }
     rotationX = 0;
     rotationY = 0; // Reset rotationY
     rotationZ = 0;
     setState(() {});
+    if (widget.controller.isRotating) {
+      _lastRotationTick = DateTime.now();
+      widget.controller.rotationController.repeat();
+    }
   }
 
   /// Add a connection to the sphere
@@ -603,8 +622,7 @@ class RotatingGlobeState extends State<RotatingGlobe>
     _decelerationController.dispose();
     _zoomAnimationController?.dispose();
     _dayNightCycleController?.dispose();
-    _genericCurvedAnimation?.dispose();
-    genericAnimationController?.dispose();
+    _cancelFocusAnimation();
     _hoverNotifier.dispose();
     _clickNotifier.dispose();
     super.dispose();
@@ -1808,6 +1826,7 @@ class RotatingGlobeState extends State<RotatingGlobe>
                 _lastScale = 1.0; // Reset scale tracking
 
                 _autoRotationDelayTimer?.cancel();
+                _cancelFocusAnimation();
                 if (_decelerationController.isAnimating) {
                   _decelerationController.stop();
                   _decelerationController.reset();
