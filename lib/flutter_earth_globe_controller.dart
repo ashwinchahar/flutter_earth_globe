@@ -196,7 +196,15 @@ class FlutterEarthGlobeController extends ChangeNotifier {
   bool get isRotating => _isRotating;
 
   /// Sets the rotation of the globe
-  set isRotating(bool value) => _isRotating;
+  set isRotating(bool value) {
+    if (_isRotating != value) {
+      if (value) {
+        startRotation();
+      } else {
+        stopRotation();
+      }
+    }
+  }
 
   /// Returns true if the globe is ready
   bool get isReady => _isReady;
@@ -814,7 +822,9 @@ class FlutterEarthGlobeController extends ChangeNotifier {
   void startRotation({double? rotationSpeed}) {
     _isRotating = true;
     this.rotationSpeed = rotationSpeed ?? this.rotationSpeed;
-    rotationController.forward();
+    if (_isReady) {
+      rotationController.repeat();
+    }
     notifyListeners();
   }
 
@@ -827,7 +837,9 @@ class FlutterEarthGlobeController extends ChangeNotifier {
   /// ```
   void stopRotation() {
     _isRotating = false;
-    rotationController.stop();
+    if (_isReady) {
+      rotationController.stop();
+    }
     notifyListeners();
   }
 
@@ -839,13 +851,11 @@ class FlutterEarthGlobeController extends ChangeNotifier {
   /// controller.toggleRotation();
   /// ```
   void toggleRotation() {
-    _isRotating = !_isRotating;
     if (_isRotating) {
-      rotationController.forward();
+      stopRotation();
     } else {
-      rotationController.stop();
+      startRotation();
     }
-    notifyListeners();
   }
 
   /// Resets the rotation of the globe.
@@ -883,14 +893,7 @@ class FlutterEarthGlobeController extends ChangeNotifier {
   /// controller.setZoom(2);
   /// ```
   void setZoom(double zoom) {
-    assert(zoom >= minZoom && zoom <= maxZoom);
-    if (zoom < minZoom) {
-      zoom = minZoom;
-    } else if (zoom > maxZoom) {
-      zoom = maxZoom;
-    } else {
-      this.zoom = zoom;
-    }
+    this.zoom = zoom.clamp(minZoom, maxZoom);
     notifyListeners();
   }
 
@@ -996,7 +999,11 @@ class FlutterEarthGlobeController extends ChangeNotifier {
     onPointConnectionAdded = null;
     onResetGlobeRotation = null;
     onLoaded = null;
-    rotationController.dispose();
+    if (_isReady) {
+      try {
+        rotationController.dispose();
+      } catch (_) {}
+    }
     super.dispose();
   }
 }
